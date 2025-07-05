@@ -1,0 +1,105 @@
+#!/bin/bash
+
+# That script will be executed on a VM as a root user. It will be at first rendered using the Terraform templatefile function.
+# We are using here variables provided by that function:
+# - username
+# - host_entries
+# - ssh_public_key
+
+
+# === Section 1: Assign given hostnames to the private IP addresses of both VMs in the /etc/hosts file. ===
+
+HOSTS_FILE="/etc/hosts"
+
+echo "Adding entries to $HOSTS_FILE..."
+
+# Entries to add to the /etc/hosts, that is lines mapping hostnames to IP addresses.
+hosts_entries=( %{ for entry in host_entries ~} "${entry}" %{ endfor ~} )
+
+for entry in "$${hosts_entries[@]}"; do
+  # Check if entry already exists
+  if grep -q "$entry" "$HOSTS_FILE"; then
+    echo "Entry '$entry' already exists. Skipping."
+  else
+    # add entry to the hosts file
+    echo "$entry" >> "$HOSTS_FILE"
+    echo "Added: $entry"
+  fi
+done
+
+echo "Done."
+
+
+# === Section 2: Adding a SSH public key to the authorized keys so we can connect from VM1. ===
+
+mkdir -p /home/${username}/.ssh # Create the .ssh directory if it doesn't exists
+chmod 700 /home/${username}/.ssh # Set correct permissions
+
+AUTHORIZED_KEYS="/home/${username}/.ssh/authorized_keys"
+
+echo "${ssh_public_key}" >> "$AUTHORIZED_KEYS" # Add the SSH public key to the authorized keys.
+
+chmod 600 "$AUTHORIZED_KEYS" # Set correct permissions for the file with authorized keys.
+chown -R ${username}:${username} /home/${username}/.ssh # Assign the ${username} user as the owner of the .ssh folder.
+
+echo "SSH public key added to authorized_keys."
+
+
+
+
+
+
+
+# === Below sections are setting up Kubernetes. ===
+
+# === Section 3: disable swap (it's required by Kubernetes). ===
+
+swapoff -a
+sed -i '/ swap / s/^/#/' /etc/fstab
+
+
+# === Section 4: Install containerd. That is a container runtime used for running containers. ===
+
+apt-get install -y containerd
+mkdir -p /etc/containerd
+containerd config default | tee /etc/containerd/config.toml
+
+# Change the 'SystemdCgroup = false' into the 'SystemdCgroup = true' in the /etc/containerd/config.toml
+# This tells the containerd to use the systemd to manage resource (CPU, memory) just like the host system.
+sed -i 's/^\([[:space:]]*SystemdCgroup = \)false/\1true/' /etc/containerd/config.toml
+systemctl restart containerd
+
+# Add this line to the /etc/crictl.yaml so the containerd knows that it should use the /var/run/containerd/containerd.sock socket.
+# Otherwise after running 'crictl ps' we will see an error of something like '/var/run/cri-dockerd.sock: no such file or directory'.
+echo "runtime-endpoint: unix:///var/run/containerd/containerd.sock" >> /etc/crictl.yaml
+
+
+# === Section 5: Install kubeadm, kubelet, and kubectl ===
+
+apt-get install -y apt-transport-https ca-certificates
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+# Add the GPG key and APT repository URL to the kubernetes.list. That url will be used to pull Kubernetes packages (like kubectl)
+cat << EOF >> /etc/apt/sources.list.d/kubernetes.list
+deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /
+EOF
+
+apt-get update
+echo | apt-get install -y kubelet kubeadm kubectl
+apt-mark hold kubelet kubeadm kubectl
+
+
+# === Section 6: Initialize Kubernetes using Calico. ===
+
+# load the br_netfilter module
+modprobe br_netfilter
+echo 'br_netfilter' | tee /etc/modules-load.d/k8s.conf
+
+# Modify the sysctl
+cat <<EOF | tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+# Apply the settings
+sysctl --system
