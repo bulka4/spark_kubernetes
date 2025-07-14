@@ -135,12 +135,20 @@ sysctl --system
 # Here we specify the CIDR, that is a IP address range from which Kubernetes will be assigning private IP addresses to pods.
 kubeadm init --pod-network-cidr=192.168.0.0/16
 
+# The kubernetes cofnig file (admin.conf) is used to connect and authenticate to Kubernetes. When a Linux user uses the kubectl 
+# command to interact with Kubernetes, that configuration file will specify what Kubernetes user will be used to perform actions
+# from that kubectl command (like create resources).
+# When we run kubectl commands then it will use the config file from the path specified by the KUBECONFIG env variable or, if it's
+# not specified, from the default location at ~/.kube/config.
 
-# Set up kubectl for the user. It is a tool for users to interact with a Kubernetes cluster.
+# Specify KUBECONFIG env variable which will be used when we run kubectl commands later on in this script as root.
+export KUBECONFIG=/etc/kubernetes/admin.conf
+
+# Set up the /home/${username}/.kube/config with Kubernetes config file which will be used by the ${username} Linux user later on
+# once we connect to that VM through SSH.
 mkdir -p /home/${username}/.kube
 cp -i /etc/kubernetes/admin.conf /home/${username}/.kube/config
 chown ${username}:${username} /home/${username}/.kube/config
-
 
 # Install Pod Network from Calico. We need to run that command as the 'username' user.
 sudo -u ${username} kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml
@@ -149,36 +157,6 @@ sudo -u ${username} kubectl apply -f https://raw.githubusercontent.com/projectca
 # Get the join command for adding worker nodes. That command will need to be executed on every worker node.
 kubeadm token create --print-join-command >> /home/${username}/k8s_join_workers.txt
 
-
-
-
-
-
-
-# ======== Install Helm and use it to install Spark Operator ========
-
-# Helm is a package manager for Kubernetes which we will use to install Spark Operator.
-# Spark Operator is needed for submitting Spark jobs to Kubernetes. It creates a Spark Driver Pod when we deploy
-# the SparkApplication manifest, and Driver Pod creates Spark Executors Pods later on. That Spark Operator will 
-# automatically get assigned a Service Account with a proper permissions by Helm.
-
-# Add Helm GPG Key
-curl -fsSL https://baltocdn.com/helm/signing.asc | tee /etc/apt/keyrings/helm.gpg > /dev/null
-
-# Add the Helm APT Repository
-echo "deb [signed-by=/etc/apt/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main" | \
-  tee /etc/apt/sources.list.d/helm-stable-debian.list > /dev/null
-
-# update apt and install Helm
-apt update
-apt install helm
-
-# Install Spark Operator using Helm. 
-helm repo add spark-operator https://googlecloudplatform.github.io/spark-on-k8s-operator
-helm repo update
-helm install spark-operator spark-operator/spark-operator --namespace spark-operator --create-namespace \
-  --set sparkJobNamespace=default \
-  --set webhook.enable=true
 
 
 
@@ -195,12 +173,24 @@ helm install spark-operator spark-operator/spark-operator --namespace spark-oper
 # launch a Jupyter Notebook. We can provide value for LAUNCH_JUPYTER when using 'docker run' command.
 
 
-mkdir /home/${username}/docker
-# username for a user which we will create in the Docker container. That user will be running Spark and Jupyter Notebook.
-SPARK_USERNAME=spark
+# SPARK_USERNAME is a username for the spark user which we will create in the Docker container. That user will be running Spark and 
+# Jupyter Notebook. We will be running Jupyter in a specific folder so the content of that folder will be visible in Jupyter
+# and there we will be creating new files from Jupyter. When we create files from Jupyter then the spark user running it will be 
+# verified for permissions to do so, so that user needs to have a write permission to the folder where we run Jupyter Notebook.
 
-# Create an entrypoint script which will be used in the Dockerfile. The LAUNCH_JUPYTER env variable decides here whether to
-# launch a Jupyter Notebook or not.
+# Folder where we will be running Jupyter will be mounted to a folder on host so the spark user needs permissions to the mounted
+# folder on host as well. For defining those permissions we need to use UID and GID of that user so we will create that user in the
+# Docker container with a specific UID and GID so we know what are those values. Otherwise those values would be generated automatically
+# and we wouldn't know their value.
+SPARK_USERNAME=spark
+SPARK_UID=999
+SPARK_GID=999
+
+
+mkdir /home/${username}/docker
+# Create an entrypoint script which will be used in the Dockerfile. If env variable LAUNCH_JUPYTER=true, then it will run Jupyter
+# in the specified folder, listening on the specified port. Otherwise it will start a bash session so the container doesn't exit
+# immediately.
 cat << EOF >> /home/${username}/docker/entrypoint.sh
 #!/bin/bash
 
@@ -215,6 +205,7 @@ fi
 EOF
 
 
+
 # Create the Dockerfile
 cat << EOT >> /home/${username}/docker/spark_jupyter.dockerfile
 # Use an official OpenJDK base image
@@ -226,7 +217,7 @@ FROM openjdk:8-jdk
 # Define environment variables needed for Spark.
 ENV SPARK_VERSION=3.4.4 \\
     # username of the spark user which will be running Spark and Jupyter Notebook.
-    USERNAME=$SPARK_USERNAME \\
+    SPARK_USERNAME=$SPARK_USERNAME \\
     # Directory where we will install Spark.
     SPARK_HOME="/opt/$SPARK_USERNAME" \\
     # This prevents from prompting user for input when installing tools with apt-get
@@ -237,8 +228,8 @@ ENV PATH=\$${PATH}:\$${SPARK_HOME}/bin
 # Use bash for all the further commands specified in the 'RUN' instructions.
 SHELL ["/bin/bash", "-c"]
 
-# Create the spark user and group
-RUN groupadd -r \$${USERNAME} && useradd -r -g \$${USERNAME} -m -d /home/\$${USERNAME} \$${USERNAME}
+# Create the spark user and group with specific UID and GID.
+RUN groupadd -r -g $SPARK_GID \$${SPARK_USERNAME} && useradd -r -u $SPARK_UID -g \$${SPARK_USERNAME} -m -d /home/\$${SPARK_USERNAME} \$${SPARK_USERNAME}
 
 # Download Spark and save it in the \$SPARK_HOME.
 RUN apt-get update && \\
@@ -267,13 +258,24 @@ RUN \\
     pip install notebook pyspark==\$${SPARK_VERSION} findspark
 
 
-# Set up a password to the Jupyter Notebook.
-RUN \\
-    # generate the .jupyter/jupyter_notebook_config.py file. We need to run that command as the 'USERNAME' user in order to create that file
-    # in the /home/USERNAME folder. In that file we will define a password.
-    su - \$${USERNAME} -c "jupyter notebook --generate-config" && \\
+COPY entrypoint.sh /opt/entrypoint.sh
 
-    # Generate hashed password using the Jupyter 7+ module and the Terraform variable jupyter_notebook_password (default = 'admin').
+# make sure the script is executable.
+RUN chmod +x /opt/entrypoint.sh
+
+
+# Set up a password to the Jupyter Notebook provided by the Terraform variable jupyter_notebook_password (default = 'admin'). 
+# We need to run all the below commands as the spark user in order to:
+# - create the jupyter_notebook_config.py file in the spark user home folder - /home/\$SPARK_USERNAME.
+# - Make the spark user an owner of the /home/\$${SPARK_USERNAME}/notebooks. That's where Jupyter will be running.
+# - Run Jupyter Notebook as that user (that is run the entrypoint.sh script).
+USER \$${SPARK_USERNAME}
+RUN \\
+    # generate the .jupyter/jupyter_notebook_config.py file. We need to run that command as the spark user in order to create that file
+    # in the /home/\$SPARK_USERNAME folder. In that file we will define a password.
+    jupyter notebook --generate-config && \\
+
+    # Generate hashed password using the Jupyter 7+ module and the Terraform variable jupyter_notebook_password.
     HASHED_PASSWORD=\$(python3 -c "from jupyter_server.auth import passwd; print(passwd('${jupyter_notebook_password}'))") && \\
 
     # Add the below lines to the jupyter_notebook_config.py file
@@ -281,24 +283,15 @@ RUN \\
 c.NotebookApp.open_browser = False\n\\
 c.NotebookApp.ip = '0.0.0.0'\n\\
 c.NotebookApp.port = 8888" \\
->> /home/\$${USERNAME}/.jupyter/jupyter_notebook_config.py && \\
+>> /home/\$${SPARK_USERNAME}/.jupyter/jupyter_notebook_config.py && \\
 
     # Create a folder where Jupyter Notebook will run. Content of that folder will be visible on the Jupyter website. 
-    # Also assign ownership of that folder to the spark user who will be running that Notebook so we can create there files from the 
-    # Jupyter website.
-    mkdir /home/$SPARK_USERNAME/notebooks && \\
-    chown -R $SPARK_USERNAME:$SPARK_USERNAME /home/$SPARK_USERNAME/notebooks
+    mkdir /home/\$${SPARK_USERNAME}/notebooks
+
 
 # Expose the default Jupyter Notebook port
 EXPOSE 8888
 
-# The entrypoint.sh script will launch a Jupyter Notebook if the LAUNCH_JUPYTER env variable = true.
-# If LAUNCH_JUPYTER = false then it will only start a bash shell to enable using a terminal inside of a container.
-COPY entrypoint.sh /opt/entrypoint.sh
-RUN chmod +x /opt/entrypoint.sh # make sure the script is executable.
-
-# We need to start Jupyter Notebook as the spark user.
-USER $SPARK_USERNAME
 ENTRYPOINT ["/opt/entrypoint.sh"]
 EOT
 
@@ -312,6 +305,9 @@ chown -R ${username}:${username} /home/${username}/docker
 
 
 # =========== Install Docker ===========
+
+# This installation of Docker is slightly different than the standard one since we already installed containerd when
+# setting up Kubernetes.
 
 # This prevents prompting user for input for example when using apt-get.
 DEBIAN_FRONTEND=noninteractive
@@ -334,7 +330,7 @@ apt-get update
 # That's because we want to keep our existing containerd used for Kubernetes.
 apt-get -y install docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin --no-install-recommends
 
-# We need to have containerd running. It is needed for Docker.
+# We need to have containerd running for using Docker. It might be stopped after we installed it for Kubernetes.
 systemctl unmask containerd
 systemctl enable containerd
 systemctl start containerd
@@ -361,18 +357,17 @@ systemctl restart docker.socket
 # in the SparkApplication YAML manifest.
 
 IMAGE_NAME=spark-jupyter
+ACR_IMAGE="${acr_url}/$${IMAGE_NAME}:latest" # ACR URL of the format myregistry.azurecr.io
 
 # Build Docker image
 docker build -f /home/${username}/docker/spark_jupyter.dockerfile -t $IMAGE_NAME /home/${username}/docker
 # Login to the ACR
 docker login ${acr_url} --username ${acr_sp_id} --password ${acr_sp_password}
 
-$ACR_IMAGE="${acr_url}/$${IMAGE_NAME}:latest" # ACR URL of the format myregistry.azurecr.io
-
-# 2. Tag the local image for ACR
+# Tag the local image for ACR
 docker tag $IMAGE_NAME $ACR_IMAGE
 
-# 3. Push the image to ACR
+# Push the image to ACR
 docker push $ACR_IMAGE
 
 
@@ -380,11 +375,203 @@ docker push $ACR_IMAGE
 
 
 
-# ========== Create a YAML manifest for creating a Kubernetes Service Account with proper permissions. ==========
 
-# That manifest will create a Service Account with proper permissions which Spark Driver Pod will be using for authentication 
-# when creating Spark Executors Pods.
+# ========= Run Docker container with Spark and Jupyter Notebook in the background ============
 
+# That container will be mounted to the /home/${username}/notebooks folder in order to save there scripts developed in Jupyter.
+
+# Here we grant to the 'username' user a read permission to it because that user will be deploying a SparkApplication 
+# Kubernetes resource which will run those scripts.
+
+# Also we make the spark user an owner of that folder. The spark user is the one which we will create in a container (as defined 
+# in the Dockerfile) and which will be running Jupyter Notebook.
+
+mkdir /home/${username}/notebooks
+chown $SPARK_UID:$SPARK_GID /home/${username}/notebooks # make the spark user an owner
+chmod 755 /home/${username}/notebooks # This sets permissions to: owner - full permissions, others: read only permisison.
+
+
+# Create a sample Spark script for running in Kubernetes (for testing).
+cat << 'EOF' >> /home/${username}/notebooks/my_script.py
+from pyspark.sql import SparkSession
+spark = SparkSession.builder \
+    .appName("SparkTest") \
+    .getOrCreate()
+EOF
+
+
+# Run a Docker container with the following options:
+# - LAUNCH_JUPYTER=true inidcates that we want to start a Jupyter Notebook.
+# - mount the /home/${username}/notebooks folder from VM to the /home/$SPARK_USERNAME/notebooks folder in a container so the 
+#   files which we create in Jupyter Notebook get saved on the host.
+# - --rm indicates that the container will be removed once it exits.
+
+docker run -d -p 8888:8888 \
+  -e LAUNCH_JUPYTER=true \
+  --mount type=bind,source=/home/${username}/notebooks,target=/home/$SPARK_USERNAME/notebooks \
+  --rm --name $IMAGE_NAME $IMAGE_NAME
+
+
+
+
+
+
+
+
+# ======== Install Helm, use it to install Spark Operator and assign permissions to Spark Operator. ========
+
+# Helm is a package manager for Kubernetes which we will use to install Spark Operator.
+# Spark Operator is needed for submitting Spark jobs to Kubernetes. It creates a Spark Driver Pod when we deploy
+# the SparkApplication resource, and Driver Pod creates Spark Executors Pods later on. That Spark Operator will 
+# automatically get assigned a Service Account with a proper permissions by Helm.
+
+# Before we install Spark Operator using Helm we need to wait until Kubernetes is ready.
+echo "Waiting for Kubernetes to be ready..."
+for i in {1..60}; do
+    if kubectl version >/dev/null 2>&1; then
+        echo "Kubernetes is ready."
+        break
+    fi
+    echo "Waiting for Kubernetes... ($i)"
+    sleep 5
+done
+
+# If Kubernetes is not ready then stop the script and save logs from executing the kubectl command.
+if ! kubectl version >/dev/null 2>&1; then
+    echo "❌ Kubernetes API never became ready after waiting. Exiting."
+    # Save the logs from executing kubectl command
+    kubectl version | tee k8s_version_check.log
+    exit 1
+fi
+
+
+# Install Helm
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Namespace where to deploy Spark Operator
+SPARK_OPERATOR_NAMESPACE=spark-operator
+
+# Install Spark Operator using Helm. 
+helm repo add spark-operator https://kubeflow.github.io/spark-operator
+helm repo update
+# I was trying to enable Webhook and generate Webhook certificates but it doesn't work. Kubernetes API server can't communicate with
+# the Webhook server.
+helm install spark-operator spark-operator/spark-operator --namespace $SPARK_OPERATOR_NAMESPACE --create-namespace \
+  --set sparkJobNamespace=default \
+  --set sparkOperatorVersion=v1beta2-1.3.8-3.1.1 \
+  --set webhook.enable=false
+  # --set webhook.enableCertManager=false \
+  # --set webhook.generateSelfSignedCert=true \
+
+
+
+
+
+
+
+
+# ========= Add tolerations to the spark-operator-controller deployment. =========
+
+# Those tolerations specify which taints the spark-operator-controller can tolerate. It is needed so the
+# spark-operator-controller can be beployed on the control plane node (master node) which has those taints.
+
+NAMESPACE="spark-operator"
+RELEASE_NAME="spark-operator-controller"
+
+# Wait for deployment to exist
+echo "Waiting for Spark Operator deployment to be created..."
+while ! kubectl get deployment $RELEASE_NAME -n $NAMESPACE >/dev/null 2>&1; do
+  sleep 3
+done
+
+# Path the deployment to add tolerations
+kubectl patch deployment $RELEASE_NAME -n $NAMESPACE --type='merge' -p "
+spec:
+  template:
+    spec:
+      tolerations:
+      - key: \"node-role.kubernetes.io/control-plane\"
+        operator: Exists
+        effect: NoSchedule
+"
+
+# Restart the deployment to apply path (optional but recommended)
+kubectl rollout restart deployment/$RELEASE_NAME -n $NAMESPACE
+
+# Wait for the Spark Operator pod to be running
+echo "Waiting for Spark Operator pod to be Running..."
+while true; do
+  STATUS=$(kubectl get pods -n $NAMESPACE -l app.kubernetes.io/name=spark-operator -o jsonpath='{.items[0].status.phase}')
+  if [[ "$STATUS" == "Running" ]]; then
+    echo "Spark Operator pod is running."
+    break
+  fi
+  echo "Current pod status: $STATUS. Waiting..."
+  sleep 5
+done
+
+
+
+
+
+
+
+
+
+
+# I am not sure if the below commented code is needed. It might be needed when using webhooks for Spark Operator.
+
+# Modify configMap of the CoreDNS. Assign 8.8.8.8 and 1.1.1.1 as IP addresses of DNS servers which will be
+# resolving DNS names which Kubernetes CoreDNS can't resolve.
+# kubectl get configmap coredns -n kube-system -o yaml > /home/${username}/coredns-patched.yaml
+# sed -i "/^ *forward \. /c\\        forward . 8.8.8.8 1.1.1.1 {" /home/${username}/coredns-patched.yaml
+# kubectl apply -f /home/${username}/coredns-patched.yaml
+# kubectl rollout restart deployment coredns -n kube-system
+# rm -r /home/${username}/coredns-patched.yaml
+
+
+# Create a manifest for assigning a role with proper permissions to the spark-operator-controller ServiceAccount
+# which is used by the Spark Operator's controller Pod.
+# cat << EOF >> /home/${username}/k8s/spark_operator_role.yaml
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: Role
+# metadata:
+#   name: spark-operator-event-role
+#   namespace: $SPARK_OPERATOR_NAMESPACE
+# rules:
+#   - apiGroups: [""]
+#     resources: ["events"]
+#     verbs: ["create", "patch", "update"]
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: RoleBinding
+# metadata:
+#   name: spark-operator-event-rolebinding
+#   namespace: $SPARK_OPERATOR_NAMESPACE
+# roleRef:
+#   apiGroup: rbac.authorization.k8s.io
+#   kind: Role
+#   name: spark-operator-event-role
+# subjects:
+#   - kind: ServiceAccount
+#     name: spark-operator-controller
+#     namespace: $SPARK_OPERATOR_NAMESPACE
+# EOF
+
+# # Deploy a manifest in order to assign a role with proper permissions to Spark Operator's controller Pod.
+# kubectl apply -f /home/${username}/k8s/spark_operator_role.yaml
+
+
+
+
+
+
+
+# ========== Deploy Kubernetes Service Account with proper permissions. ==========
+
+# That Service Account will be used by the Spark Driver Pod for authentication when creating Spark Executors Pods.
+
+# Create a manifest for deploying Service Account
 cat << EOF >> /home/${username}/k8s/spark_service_account.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -397,18 +584,18 @@ kind: ClusterRole
 metadata:
   name: spark-role
 rules:
-  - apiGroups: [""]
-    resources: ["pods", "pods/exec", "pods/log", "services", "configmaps", "secrets"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["batch", "extensions"]
-    resources: ["jobs"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["apps"]
-    resources: ["statefulsets"]
-    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
-  - apiGroups: ["sparkoperator.k8s.io"]
-    resources: ["sparkapplications", "scheduledsparkapplications"]
-    verbs: ["*"]
+- apiGroups: [""]
+  resources: ["pods", "pods/exec", "pods/log", "services", "configmaps", "secrets"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+- apiGroups: ["batch", "extensions"]
+  resources: ["jobs"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+- apiGroups: ["apps"]
+  resources: ["statefulsets"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+- apiGroups: ["sparkoperator.k8s.io"]
+  resources: ["sparkapplications", "scheduledsparkapplications"]
+  verbs: ["*"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -419,12 +606,13 @@ roleRef:
   kind: ClusterRole
   name: spark-role
 subjects:
-  - kind: ServiceAccount
-    name: spark
-    namespace: default
+- kind: ServiceAccount
+  name: spark
+  namespace: default
 EOF
 
-
+# Deploy the Service Account.
+kubectl apply -f /home/${username}/k8s/spark_service_account.yaml
 
 
 
@@ -433,10 +621,11 @@ EOF
 # ====== Section 17: Prepare a SparkApplication manifest ======
 
 # That SparkApplication manifest will be used to submitting Spark jobs. After deploying it, it will be used by
-# the Spark Operator as described earlier.
-# It creates a volume at the /home/${username}/notebooks path at host and mount it to the created containers.
+# the Spark Operator as described earlier in the section where we were installing Spark Operator with Helm.
+# It creates a volume at the /home/${username}/notebooks path at host and mount it to the created Pods.
 # That volume will contain Spark scripts to run.
-# This resource runs the specified Spark script: my_script.py
+# This SparkApplication resource runs the specified Spark script: my_script.py
+# We are using here tolerations to allow deploying sparkApplication on the control plane node (master node).
 
 cat << EOF >> /home/${username}/k8s/spark_application.yaml
 apiVersion: "sparkoperator.k8s.io/v1beta2"
@@ -450,63 +639,39 @@ spec:
   pythonVersion: "3"
   image: $ACR_IMAGE  # Spark image with Python support
   imagePullPolicy: Always
-  mainApplicationFile: "local:///opt/spark/scripts/my_script.py" # Spark script to run
+  mainApplicationFile: "local:///opt/spark/scripts/my_script.py" # Spark script to run. That is a path inside the Spark Driver Pod's container.
   sparkVersion: "3.4.4"
+  volumes:
+  - name: scripts-volume
+    hostPath:
+      path: /home/${username}/notebooks   # path on the Kubernetes node (VM) with Spark scripts
+      type: Directory
   restartPolicy:
     type: Never
   driver:
+    tolerations: # This toleration will allow us to deploy SparkApplication on the control plane node (master node)
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
     cores: 1
     memory: "512m"
-    serviceAccount: spark # Use a proper service account for authentication for Spark Driver.
+    serviceAccount: spark # Use a proper service account created earlier for authentication for Spark Driver.
     labels:
       version: 3.3.1
-    volumes:
-      - name: scripts-volume
-        hostPath:
-          path: /home/${username}/notebooks   # path on the Kubernetes node (VM) with Spark scripts
-          type: Directory
     volumeMounts:
-      - name: scripts-volume
-        mountPath: /opt/spark/scripts  # path inside the container where Spark scripts will be accessible
+     - name: scripts-volume
+       mountPath: /opt/spark/scripts  # path inside the Spark Driver Pod's container with Spark scripts
   executor:
+    tolerations: # This toleration will allow us to deploy SparkApplication on the control plane node (master node)
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
     cores: 1
     instances: 2
     memory: "512m"
     labels:
       version: 3.3.1
-    volumes:
-      - name: scripts-volume
-        hostPath:
-          path: /home/${username}/notebooks   # path on the Kubernetes node (VM) with Spark scripts
-          type: Directory
     volumeMounts:
-      - name: scripts-volume
-        mountPath: /opt/spark/scripts  # path inside the container where Spark scripts will be accessible
+    - name: scripts-volume
+      mountPath: /opt/spark/scripts  # path inside the container where Spark scripts will be accessible
 EOF
-
-
-
-
-
-
-
-# ========= Run Docker container with Spark and Jupyter Notebook in the background ============
-
-# That container will be mounted to the /home/${username}/notebooks folder in order to save there scripts developed in Jupyter.
-# The 'username' user needs to have a read permission to it because that user will be deploying a SparkApplication 
-# Kubernetes resource which will run those scripts.
-
-mkdir /home/${username}/notebooks
-# Grant those permissions: root - full access, others - read only.
-chmod 755 /home/${username}/notebooks
-
-# Run a Docker container with the following options:
-# - LAUNCH_JUPYTER=true inidcates that we want to start a Jupyter Notebook.
-# - mount the /home/${username}/notebooks from VM to the /home/$SPARK_USERNAME/notebooks in a container so the 
-#   files which we create in Jupyter Notebook get saved on the host.
-# - --rm indicates that the container will be removed once it exits.
-
-docker run -d -p 8888:8888 \\
-  -e LAUNCH_JUPYTER=true \\
-  --mount type=bind, source=/home/${username}/notebooks, target=/home/$SPARK_USERNAME/notebooks \\
-  --rm --name $IMAGE_NAME $IMAGE_NAME

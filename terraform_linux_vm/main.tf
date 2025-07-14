@@ -8,7 +8,7 @@ module "resource_group" {
 # using SparkApplication resource.
 module "acr" {
   source = "./modules/acr"
-  acr_name                = var.acr_name
+  acr_name                = "sparkScripts" # Name of the created ACR
   resource_group_name     = var.resource_group_name
   resource_group_location = var.resource_group_location
 }
@@ -16,9 +16,9 @@ module "acr" {
 # Service Principal for authentication to the ACR.
 module "service_principal" {
   source = "./modules/service_principal"
-  service_principal_display_name = var.service_principal_display_name
+  service_principal_display_name = "spark_scripts_acr"
   scope = module.acr.id
-  role = var.service_principal_role
+  role = "acrpush"  # Allow for both pushing and pulling images from ACR.
 }
 
 # Prepare networks for our VMs.
@@ -70,6 +70,8 @@ module "linux_vm_1" {
   storage_account_uri = module.storage_account.primary_blob_endpoint
 }
 
+
+/*
 # Prepare the second VM. It will act as a worker node.
 module "linux_vm_2" {
   source = "./modules/linux_vm"
@@ -87,11 +89,15 @@ module "linux_vm_2" {
 
   storage_account_uri = module.storage_account.primary_blob_endpoint
 }
+*/
+
 
 # Prepare a variable which will be inserted into bash scripts which will be executed on both VMs.
 locals {
   # hosts_entries are lines we want to add to the /etc/hosts file on VMs to assign
   # hosts names to private IP addresses.
+  host_entries = []
+  /*
   host_entries = [
     for ip_address, hostname in zipmap(
       [module.linux_vm_1.private_ip_address, module.linux_vm_2.private_ip_address]
@@ -99,6 +105,7 @@ locals {
     ) :
     "${ip_address} ${hostname}"
   ]
+  */
 }
 
 # Execute bash scripts on the created VMs in order to configure Spark and Kubernetes. For that we are using the azurerm_virtual_machine_extension
@@ -127,7 +134,7 @@ resource "azurerm_virtual_machine_extension" "vm1_configure" {
   })
 }
 
-
+/*
 # Configure the VM2 by executing a bash script which will set up a passwordless SSH connection from VM1 to VM2
 # and configure Spark and Kubernetes.
 resource "azurerm_virtual_machine_extension" "vm2_configure" {
@@ -147,3 +154,4 @@ resource "azurerm_virtual_machine_extension" "vm2_configure" {
     }))
   })
 }
+*/

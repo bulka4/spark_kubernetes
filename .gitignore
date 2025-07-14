@@ -4,4 +4,5 @@ terraform.tfvars
 *.tfplan
 *.hcl
 .terraform
-*docker
+docker
+terraform_test
