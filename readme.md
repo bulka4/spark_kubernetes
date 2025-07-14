@@ -119,7 +119,7 @@ We need to have a subscription on the Azure platform portal.azure.com.
 We need to configure properly Terraform on our computer so it can create resources in our Azure subscription, it is described here: [developer.hashicorp.com](https://developer.hashicorp.com/terraform/tutorials/azure-get-started/azure-build).
 
 ## Terraform variables
-We need to specify values for Terraform variables. In order to do that we need to create the terraform.tfvars file which looks like the terraform-draft.tfvars and provide there proper values for all the listed variables.
+We need to specify values for Terraform variables. In order to do that we need to create the terraform.tfvars file which looks like the terraform-draft.tfvars and provide there proper values for all the listed variables. It is described in that draft file what values to provide.
 
 
 
