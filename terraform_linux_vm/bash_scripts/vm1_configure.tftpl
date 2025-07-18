@@ -115,9 +115,6 @@ sed -i '/ swap / s/^/#/' /etc/fstab
 
 # create a k8s folder. We will be using it for storing files relevant to Kubernetes (like manifests).
 mkdir /home/${username}/k8s
-# The 'username' user need to have read and write permissions to that folder in order to deploy manifests
-# saved there.
-chown ${username}:${username} /home/${username}/k8s
 
 # load the br_netfilter module
 modprobe br_netfilter
@@ -156,6 +153,36 @@ sudo -u ${username} kubectl apply -f https://raw.githubusercontent.com/projectca
 
 # Get the join command for adding worker nodes. That command will need to be executed on every worker node.
 kubeadm token create --print-join-command >> /home/${username}/k8s_join_workers.txt
+
+
+
+
+
+
+
+
+# ======== Wait for the Kubernetes to be ready ============
+
+# Before we progress with the script we need to wait until Kubernetes is ready so we can use the kubectl command.
+
+echo "Waiting for Kubernetes to be ready..."
+for i in {1..60}; do
+    if kubectl version >/dev/null 2>&1; then
+        echo "Kubernetes is ready."
+        break
+    fi
+    echo "Waiting for Kubernetes... ($i)"
+    sleep 5
+done
+
+# If Kubernetes is not ready then stop the script and save logs from executing the kubectl command.
+if ! kubectl version >/dev/null 2>&1; then
+    echo "Kubernetes API never became ready after waiting. Exiting."
+    # Save the logs from executing kubectl command
+    kubectl version | tee k8s_version_check.log
+    exit 1
+fi
+
 
 
 
@@ -425,141 +452,77 @@ docker run -d -p 8888:8888 \
 # the SparkApplication resource, and Driver Pod creates Spark Executors Pods later on. That Spark Operator will 
 # automatically get assigned a Service Account with a proper permissions by Helm.
 
-# Before we install Spark Operator using Helm we need to wait until Kubernetes is ready.
-echo "Waiting for Kubernetes to be ready..."
-for i in {1..60}; do
-    if kubectl version >/dev/null 2>&1; then
-        echo "Kubernetes is ready."
-        break
-    fi
-    echo "Waiting for Kubernetes... ($i)"
-    sleep 5
-done
-
-# If Kubernetes is not ready then stop the script and save logs from executing the kubectl command.
-if ! kubectl version >/dev/null 2>&1; then
-    echo "❌ Kubernetes API never became ready after waiting. Exiting."
-    # Save the logs from executing kubectl command
-    kubectl version | tee k8s_version_check.log
-    exit 1
-fi
-
 
 # Install Helm
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-# Namespace where to deploy Spark Operator
-SPARK_OPERATOR_NAMESPACE=spark-operator
-
 # Install Spark Operator using Helm. 
 helm repo add spark-operator https://kubeflow.github.io/spark-operator
 helm repo update
-# I was trying to enable Webhook and generate Webhook certificates but it doesn't work. Kubernetes API server can't communicate with
-# the Webhook server.
-helm install spark-operator spark-operator/spark-operator --namespace $SPARK_OPERATOR_NAMESPACE --create-namespace \
-  --set sparkJobNamespace=default \
-  --set sparkOperatorVersion=v1beta2-1.3.8-3.1.1 \
-  --set webhook.enable=false
-  # --set webhook.enableCertManager=false \
-  # --set webhook.generateSelfSignedCert=true \
-
-
-
-
-
-
-
-
-# ========= Add tolerations to the spark-operator-controller deployment. =========
-
-# Those tolerations specify which taints the spark-operator-controller can tolerate. It is needed so the
-# spark-operator-controller can be beployed on the control plane node (master node) which has those taints.
 
 NAMESPACE="spark-operator"
-RELEASE_NAME="spark-operator-controller"
 
-# Wait for deployment to exist
-echo "Waiting for Spark Operator deployment to be created..."
-while ! kubectl get deployment $RELEASE_NAME -n $NAMESPACE >/dev/null 2>&1; do
-  sleep 3
+helm install spark-operator spark-operator/spark-operator --namespace $NAMESPACE --create-namespace \
+  --set sparkJobNamespace=default \
+  --set sparkOperatorVersion=v1beta2-1.3.8-3.1.1 \
+  --set webhook.enable=true \
+  --set webhook.enableCertManager=false \
+  --set webhook.generateSelfSignedCert=true
+
+
+
+
+
+
+
+# ========= Patch the Spark Operator Controller and Webhook deployments ===========
+
+# We need to patch Spark Operator deployments, for both controller and webhook, such that we add to them tolerations which will 
+# allow for deploying them on the master node (control plane).
+
+# Wait until spark operator pods are started
+LABEL="app.kubernetes.io/name=spark-operator"
+INTERVAL=5
+
+
+for i in {1..12}; do
+  no_pods=$(kubectl -n $NAMESPACE get pods -l $LABEL --no-headers 2>/dev/null | wc -l)
+  
+  if [ "$no_pods" -gt 0 ]; then
+    echo "Spark Operator pods are started!"
+    exit 0
+  fi
+
+  echo "Pods not running yet. Sleeping $INTERVAL seconds..."
+  sleep $INTERVAL
 done
 
-# Path the deployment to add tolerations
-kubectl patch deployment $RELEASE_NAME -n $NAMESPACE --type='merge' -p "
+
+# Patch Spark Operator Controller deployment
+kubectl -n spark-operator patch deployment spark-operator-controller --type merge -p '
 spec:
   template:
     spec:
       tolerations:
-      - key: \"node-role.kubernetes.io/control-plane\"
-        operator: Exists
-        effect: NoSchedule
-"
-
-# Restart the deployment to apply path (optional but recommended)
-kubectl rollout restart deployment/$RELEASE_NAME -n $NAMESPACE
-
-# Wait for the Spark Operator pod to be running
-echo "Waiting for Spark Operator pod to be Running..."
-while true; do
-  STATUS=$(kubectl get pods -n $NAMESPACE -l app.kubernetes.io/name=spark-operator -o jsonpath='{.items[0].status.phase}')
-  if [[ "$STATUS" == "Running" ]]; then
-    echo "Spark Operator pod is running."
-    break
-  fi
-  echo "Current pod status: $STATUS. Waiting..."
-  sleep 5
-done
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+'
+kubectl -n spark-operator rollout status deployment spark-operator-controller
 
 
+# Patch Spark Operator Webhook deployment
+kubectl -n spark-operator patch deployment spark-operator-webhook --type merge -p '
+spec:
+  template:
+    spec:
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+'
+kubectl -n spark-operator rollout status deployment spark-operator-webhook
 
-
-
-
-
-
-
-
-# I am not sure if the below commented code is needed. It might be needed when using webhooks for Spark Operator.
-
-# Modify configMap of the CoreDNS. Assign 8.8.8.8 and 1.1.1.1 as IP addresses of DNS servers which will be
-# resolving DNS names which Kubernetes CoreDNS can't resolve.
-# kubectl get configmap coredns -n kube-system -o yaml > /home/${username}/coredns-patched.yaml
-# sed -i "/^ *forward \. /c\\        forward . 8.8.8.8 1.1.1.1 {" /home/${username}/coredns-patched.yaml
-# kubectl apply -f /home/${username}/coredns-patched.yaml
-# kubectl rollout restart deployment coredns -n kube-system
-# rm -r /home/${username}/coredns-patched.yaml
-
-
-# Create a manifest for assigning a role with proper permissions to the spark-operator-controller ServiceAccount
-# which is used by the Spark Operator's controller Pod.
-# cat << EOF >> /home/${username}/k8s/spark_operator_role.yaml
-# apiVersion: rbac.authorization.k8s.io/v1
-# kind: Role
-# metadata:
-#   name: spark-operator-event-role
-#   namespace: $SPARK_OPERATOR_NAMESPACE
-# rules:
-#   - apiGroups: [""]
-#     resources: ["events"]
-#     verbs: ["create", "patch", "update"]
-# ---
-# apiVersion: rbac.authorization.k8s.io/v1
-# kind: RoleBinding
-# metadata:
-#   name: spark-operator-event-rolebinding
-#   namespace: $SPARK_OPERATOR_NAMESPACE
-# roleRef:
-#   apiGroup: rbac.authorization.k8s.io
-#   kind: Role
-#   name: spark-operator-event-role
-# subjects:
-#   - kind: ServiceAccount
-#     name: spark-operator-controller
-#     namespace: $SPARK_OPERATOR_NAMESPACE
-# EOF
-
-# # Deploy a manifest in order to assign a role with proper permissions to Spark Operator's controller Pod.
-# kubectl apply -f /home/${username}/k8s/spark_operator_role.yaml
 
 
 
@@ -618,14 +581,46 @@ kubectl apply -f /home/${username}/k8s/spark_service_account.yaml
 
 
 
+
+
+
+# ====== Create a secret for authentication to ACR. ======
+
+# Spark Driver and Executor Pods created by the SparkApplication resource will need to pull Docker image with Spark from ACR. In order to do 
+# that we need to create a secret which will be used for authentication and use the imagePullSecrets parameter in the Spark Application manifest
+# to get that secret.
+
+# Here we create a new secret which holds a new value generated based on credentials to the ACR.
+# Here it doesn't matter what email we provide as the docker-email parameter.
+kubectl create secret docker-registry acr-auth \
+  --docker-server=${acr_url} \
+  --docker-username=${acr_sp_id} \
+  --docker-password=${acr_sp_password} \
+  --docker-email=unused@example.com \
+  --namespace=default
+
+
+
+
+
+
+
 # ====== Section 17: Prepare a SparkApplication manifest ======
 
-# That SparkApplication manifest will be used to submitting Spark jobs. After deploying it, it will be used by
+# That SparkApplication manifest will be used for submitting Spark jobs. After deploying it, it will be used by
 # the Spark Operator as described earlier in the section where we were installing Spark Operator with Helm.
+
 # It creates a volume at the /home/${username}/notebooks path at host and mount it to the created Pods.
 # That volume will contain Spark scripts to run.
+
 # This SparkApplication resource runs the specified Spark script: my_script.py
+
 # We are using here tolerations to allow deploying sparkApplication on the control plane node (master node).
+# Using tolerations requires enabling webhook in Spark Operator.
+
+# Also we are using here imagePullSecrets to get a secret created before for authentication to the ACR when
+# pulling a Docker image with Spark.
+
 
 cat << EOF >> /home/${username}/k8s/spark_application.yaml
 apiVersion: "sparkoperator.k8s.io/v1beta2"
@@ -637,41 +632,69 @@ spec:
   type: Python
   mode: cluster
   pythonVersion: "3"
-  image: $ACR_IMAGE  # Spark image with Python support
   imagePullPolicy: Always
-  mainApplicationFile: "local:///opt/spark/scripts/my_script.py" # Spark script to run. That is a path inside the Spark Driver Pod's container.
   sparkVersion: "3.4.4"
+  restartPolicy:
+    type: Never
+
+  # Spark script to run. That is a path inside the Spark Driver Pod's container.
+  mainApplicationFile: "local:///opt/spark/scripts/my_script.py"
+
+  # Docker image with Spark (a URL to the ACR from where we will pull an image)
+  image: $ACR_IMAGE
+  # Get a secret with value for authentication to the ACR.
+  imagePullSecrets:
+  - acr-auth
+  
+  # Create a volume with Spark scripts
   volumes:
   - name: scripts-volume
     hostPath:
       path: /home/${username}/notebooks   # path on the Kubernetes node (VM) with Spark scripts
       type: Directory
-  restartPolicy:
-    type: Never
+
+
+  # Specify parameters for the Spark Driver Pod
   driver:
-    tolerations: # This toleration will allow us to deploy SparkApplication on the control plane node (master node)
-    - key: "node-role.kubernetes.io/control-plane"
-      operator: "Exists"
-      effect: "NoSchedule"
     cores: 1
     memory: "512m"
     serviceAccount: spark # Use a proper service account created earlier for authentication for Spark Driver.
     labels:
       version: 3.3.1
+    
+    # Mount a volume with Spark scripts
     volumeMounts:
-     - name: scripts-volume
-       mountPath: /opt/spark/scripts  # path inside the Spark Driver Pod's container with Spark scripts
-  executor:
-    tolerations: # This toleration will allow us to deploy SparkApplication on the control plane node (master node)
+    - name: scripts-volume
+      mountPath: /opt/spark/scripts  # path inside the Spark Driver Pod's container with Spark scripts
+
+    # This toleration will allow us to deploy SparkApplication on the control plane node (master node)
+    tolerations:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
+
+
+  # Specify parameters for the Spark Executors' Pods 
+  executor:
     cores: 1
     instances: 2
     memory: "512m"
     labels:
       version: 3.3.1
+
+    # Mount a volume with Spark scripts
     volumeMounts:
     - name: scripts-volume
       mountPath: /opt/spark/scripts  # path inside the container where Spark scripts will be accessible
+
+    # This toleration will allow us to deploy SparkApplication on the control plane node (master node)
+    tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
 EOF
+
+
+# The 'username' user need to have read and write permissions to that folder in order to deploy manifests
+# saved there.
+chown -R ${username}:${username} /home/${username}/k8s

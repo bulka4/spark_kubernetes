@@ -275,3 +275,22 @@ Here is described how to get values needed for SSH connection:
 The ssh_path Terraform variable specifies where on our local computer the private key will be saved. The recommended one for Windows is C:\\Users\\username\\.ssh\\id_rsa (if we save the private key here then we don't need to provide a path to that key when running the 'ssh' command).
 
 We are using the modules/ssh module which generates SSH keys as strings which are saved on our local computer and created VMs.
+
+
+
+
+
+# Code developments notes
+In this section are some important notes regarding why this code was developed this way and they might be useful when trying to modify this code or use a part of it for other purposes.
+
+## Spark Operator webhook
+I was trying to use webhook for Spark Operator but it doesn't work. Kubernetes API is not able to communitace with that webhook.
+
+Webhook allows us to provide some additional parameters for Driver and Executors Pods. The same can be also obtained using a Pod Template File.
+
+for example adding tolerations or credentials for pulling Docker images from container registry.
+
+## Pod Template File
+I was trying to mount a Pod Template File to SparkApplication in order to specify tolerations and imagePullSecrets fields but it doesn't work. 
+
+Finally I managed to include tolerations and imagePullSecrets in the SparkApplication manifest without Pod Template File.

@@ -59,6 +59,7 @@ module "linux_vm_1" {
   resource_group_name = module.resource_group.name
   resource_group_location = module.resource_group.location
 
+  vm_size = "Standard_B4ms"
   vm_name = "VM1"
   hostname = var.hostnames[0] # hostname of the Master Node
   subnet_id = module.networks.subnet_id
@@ -79,6 +80,7 @@ module "linux_vm_2" {
   resource_group_name = module.resource_group.name
   resource_group_location = module.resource_group.location
 
+  vm_size = "Standard_B4ms"
   vm_name = "VM2"
   hostname = var.hostnames[1] # hostname of the Slave Node
   subnet_id = module.networks.subnet_id
@@ -96,6 +98,7 @@ module "linux_vm_2" {
 locals {
   # hosts_entries are lines we want to add to the /etc/hosts file on VMs to assign
   # hosts names to private IP addresses.
+  
   host_entries = []
   /*
   host_entries = [
