@@ -37,14 +37,6 @@ module "ssh_1"{
   ssh_path = var.ssh_path
 }
 
-# Generate SSH keys for communication between created VMs. Private key will be saved on one VM (VM1, master node) 
-# and the public key will be added to the authorized keys on the second VM (VM2, worker node).
-module "ssh_2" {
-  source = "./modules/ssh"
-  resource_group_id = module.resource_group.id
-  resource_group_location = module.resource_group.location
-}
-
 # Storage account for saving logs from VMs.
 module "storage_account" {
   source = "./modules/storage_account"
@@ -59,7 +51,8 @@ module "linux_vm_1" {
   resource_group_name = module.resource_group.name
   resource_group_location = module.resource_group.location
 
-  vm_size = "Standard_B4ms"
+  # vm_size = "Standard_B4ms"
+  vm_size = "Standard_B2ms"
   vm_name = "VM1"
   hostname = var.hostnames[0] # hostname of the Master Node
   subnet_id = module.networks.subnet_id
@@ -72,7 +65,7 @@ module "linux_vm_1" {
 }
 
 
-/*
+
 # Prepare the second VM. It will act as a worker node.
 module "linux_vm_2" {
   source = "./modules/linux_vm"
@@ -80,7 +73,8 @@ module "linux_vm_2" {
   resource_group_name = module.resource_group.name
   resource_group_location = module.resource_group.location
 
-  vm_size = "Standard_B4ms"
+  # vm_size = "Standard_B4ms"
+  vm_size = "Standard_B2ms"
   vm_name = "VM2"
   hostname = var.hostnames[1] # hostname of the Slave Node
   subnet_id = module.networks.subnet_id
@@ -91,25 +85,8 @@ module "linux_vm_2" {
 
   storage_account_uri = module.storage_account.primary_blob_endpoint
 }
-*/
 
 
-# Prepare a variable which will be inserted into bash scripts which will be executed on both VMs.
-locals {
-  # hosts_entries are lines we want to add to the /etc/hosts file on VMs to assign
-  # hosts names to private IP addresses.
-  
-  host_entries = []
-  /*
-  host_entries = [
-    for ip_address, hostname in zipmap(
-      [module.linux_vm_1.private_ip_address, module.linux_vm_2.private_ip_address]
-      ,var.hostnames
-    ) :
-    "${ip_address} ${hostname}"
-  ]
-  */
-}
 
 # Execute bash scripts on the created VMs in order to configure Spark and Kubernetes. For that we are using the azurerm_virtual_machine_extension
 # resource which uses the Azure VM Extension.
@@ -127,8 +104,6 @@ resource "azurerm_virtual_machine_extension" "vm1_configure" {
     # Insert variables into the bash script using the templatefile function before executing them.
     script = base64encode(templatefile("bash_scripts/vm1_configure.tftpl", {
       username = var.vm_username # User which will be created on the VM.
-      host_entries = local.host_entries
-      ssh_private_key = module.ssh_2.private_key
       jupyter_notebook_password = var.jupyter_notebook_password # password for accessing Jupyter Notebook
       acr_url = module.acr.url
       acr_sp_id = module.service_principal.client_id # Service Principal Client ID for authentication to the ACR
@@ -137,7 +112,7 @@ resource "azurerm_virtual_machine_extension" "vm1_configure" {
   })
 }
 
-/*
+
 # Configure the VM2 by executing a bash script which will set up a passwordless SSH connection from VM1 to VM2
 # and configure Spark and Kubernetes.
 resource "azurerm_virtual_machine_extension" "vm2_configure" {
@@ -151,10 +126,6 @@ resource "azurerm_virtual_machine_extension" "vm2_configure" {
     # Insert variables into the bash script using the templatefile function before executing them.
     script = base64encode(templatefile("bash_scripts/vm2_configure.tftpl", {
       username = var.vm_username # User which will be created on the VM.
-      hostnames = var.hostnames
-      host_entries = local.host_entries
-      ssh_public_key = module.ssh_2.public_key
     }))
   })
 }
-*/
