@@ -14,12 +14,12 @@ Once we have Spark code prepared we will be able to submit a Spark job on a Kube
 
 We will use the same Docker image for running Spark in a local mode and Jupyter Notebook, and for running Spark jobs in a distributed way on a Kubernetes cluster. 
 
-For running Spark jobs on a Kubernetes cluster we will use Spark Operator and SparkApplication CRD. It can be ran manually from a terminal using the kubectl or it can be also trigerred by Airflow.
+For running Spark jobs on a Kubernetes cluster we will use Spark Operator and SparkApplication CRD. It can be ran manually from a terminal using the kubectl or it can be also triggered by Airflow.
 
 Further in this document we have the following main sections:
 - Repository guide - How to use code from this repository
 - Prerequisites - What we need to do in order to be able to use this code
-- Code explanation - How this code works - the most importnat concepts
+- Code explanation - How this code works - the most important concepts
 - Problems and ideas for improvements - Problems with this code and how to improve it
 
 This code is not production ready but it is a good starting point for preparing a framework for submitting Spark jobs on Kubernetes using Spark Operator. It helps with learning how to configure a multi node Kubernetes cluster and how to submit Spark jobs using Spark Operator.
@@ -186,7 +186,7 @@ The terraform_linux_vm/bash_scripts/vm1_configure bash script is automatically e
 
 Running container:
 - Contains Spark setup to run in a local mode
-- Runs Jupyter Notebook which will be accesible through a browser
+- Runs Jupyter Notebook which will be accessible through a browser
 - Scripts created in Jupyter Notebook will be saved on the host thanks to mounts.
 
 ### Docker image usage
@@ -197,7 +197,7 @@ The same Docker image will be used to run Spark jobs on Kubernetes. In that case
 ### Docker image - Bind mounting
 The /home/spark/notebooks folder from a container will be mounted to the /home/username/notebooks folder on the host. This way all the notebooks which we create in Jupyter Notebook will be saved on host in the /home/username/notebooks folder, and the same folder will be used as a mounted volume for Kubernetes SparkApplication resource.
 
-This way we can develop scripts in Jupyter Notebook, they will be saved on host and then they will be ran on the Kubernetes cluster using the SparkApplication resource. More details about that workflow is in the 'Workflow - developing code in Jupyter and deploying on Kubernetes' section of this documentation.
+This way we can develop scripts in Jupyter Notebook, they will be saved on host and then they will be ran on the Kubernetes cluster using the SparkApplication resource. More details about that workflow are in the 'Workflow - developing code in Jupyter and deploying on Kubernetes' section of this documentation.
 
 
 
