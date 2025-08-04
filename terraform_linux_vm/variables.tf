@@ -28,8 +28,8 @@ variable "ssh_path" {
 variable "hostnames" {
     type = list(string)
     description = <<EOT
-      Names of hosts we want to assign to nodes in a Hadoop cluster. The first element must be name of the master node and the next elements
-      are hosts names of slave nodes.
+      Names of hosts we want to assign to nodes in the Kubernetes cluster. The first element must be name of the master node and the next elements
+      are hosts names of worker nodes.
     EOT
     default = ["master", "worker1"]
 }

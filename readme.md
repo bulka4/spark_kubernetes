@@ -16,6 +16,8 @@ We will use the same Docker image for running Spark in a local mode and Jupyter 
 
 For running Spark jobs on a Kubernetes cluster we will use Spark Operator and SparkApplication CRD. It can be ran manually from a terminal using the kubectl or it can be also triggered by Airflow.
 
+There are some issues with this code described at the end of this document in the 'Problems and ideas for improvements' section.
+
 Further in this document we have the following main sections:
 - Repository guide - How to use code from this repository
 - Prerequisites - What we need to do in order to be able to use this code
@@ -56,9 +58,7 @@ Here is described how to get values needed for SSH connection:
 - **ip_address** - In order to get IP addresses of both created VMs we need to use the Terraform outputs called 'public_ip_address_vm_1' and 'public_ip_address_vm_2'. More info about those outputs in the 'Terraform outputs' section of this documentation.
 - **username**- The username value is the same as the one defined in the terraform.tfvars file for the vm_username variable (or the default one 'azureadmin' defined in the variables.tf).
 
-The ssh_path Terraform variable specifies where on our local computer the private key will be saved. The recommended one for Windows is C:\\Users\\username\\.ssh\\id_rsa (if we save the private key here then we don't need to provide a path to that key when running the 'ssh' command).
-
-We are using the modules/ssh module which generates SSH keys as strings which are saved on our local computer and created VMs.
+More information about how this works is further in this document in the 'SSH key generation' section.
 
 ## Setting up a Kubernetes cluster
 When we run 'terraform apply', Terraform performs the initial setup of Kubernetes by executing bash scripts from the bash_scripts folder on both VMs:
@@ -67,7 +67,7 @@ When we run 'terraform apply', Terraform performs the initial setup of Kubernete
 
 But the worker node is not added to the cluster yet, we need to add it manually.
 
-The bash script which we execute on the VM1 will save on it the join command in the /home/username/k8s_join_workers.txt file. We need to copy that command and execute it on the VM2. That will add VM2 as a worker node to the cluster.
+The bash script which we execute on the VM1 will save on it the join command in the /home/azureadmin/k8s_join_workers.txt file. We need to copy that command and execute it on the VM2. That will add VM2 as a worker node to the cluster.
 
 In order to add VM2 as a worker node to the cluster we need to follow those steps:
 - connect from our local computer to the VM1 using SSH
@@ -113,7 +113,7 @@ spark = SparkSession.builder \
 So we don't specify here the master. It will be added automatically by the Kubernetes Spark Operator.
 
 ## Running Spark script on Kubernetes
-We can either use the prepared testing script saved at /home/username/notebooks/my_script.py at both VMs or we can create our own script through Jupyter Notebook.
+We can either use the prepared testing script saved at /home/azureadmin/notebooks/my_script.py at both VMs or we can create our own script through Jupyter Notebook.
 
 In order to run a Spark script on Kubernetes we need to deploy a SparkApplication resource using prepared manifest:
 >kubectl apply -f ~/k8s/spark_application.yaml
@@ -160,10 +160,10 @@ The workflow of developing code in Jupyter Notebook and deploying it on Kubernet
 - Run the container which runs Jupyter Notebook and Spark to develop Spark script (it is ran automatically by Terraform after creating VMs)
 - Save the script as the my_script.py file. It will be saved in both:
     - The container in the /home/spark/notebooks folder
-    - On the host in the /home/username/notebooks folder
+    - On the host in the /home/azureadmin/notebooks folder
 
     That's thanks to the bind mounting.
-- We deploy the SparkApplication resource which uses the /home/username/notebooks folder on the node as a mounted volume for created container. This way Pods created by the Spark Operator has access to the created script my_script.py and it runs that script on the Kubernetes cluster.
+- We deploy the SparkApplication resource which uses the /home/azureadmin/notebooks folder on the node as a mounted volume for created container. This way Pods created by the Spark Operator has access to the created script my_script.py and it runs that script on the Kubernetes cluster.
 
 More information about how this mounting works is included in other sections of this documentation:
 - 'SparkApplication volumes and volumeMounts'
@@ -195,7 +195,7 @@ In the image we create the /home/spark/notebooks folder which will contain all t
 The same Docker image will be used to run Spark jobs on Kubernetes. In that case it doesn't start a Jupyter Notebook. Whether that Docker image starts a Jupyter Notebook or not depends on a value of the LAUNCH_JUPYTER environment variable (true or false) which is used in the entrypoint.sh file.
 
 ### Docker image - Bind mounting
-The /home/spark/notebooks folder from a container will be mounted to the /home/username/notebooks folder on the host. This way all the notebooks which we create in Jupyter Notebook will be saved on host in the /home/username/notebooks folder, and the same folder will be used as a mounted volume for Kubernetes SparkApplication resource.
+The /home/spark/notebooks folder from a container will be mounted to the /home/azureadmin/notebooks folder on the host. This way all the notebooks which we create in Jupyter Notebook will be saved on host in the /home/azureadmin/notebooks folder, and the same folder will be used as a mounted volume for Kubernetes SparkApplication resource.
 
 This way we can develop scripts in Jupyter Notebook, they will be saved on host and then they will be ran on the Kubernetes cluster using the SparkApplication resource. More details about that workflow are in the 'Workflow - developing code in Jupyter and deploying on Kubernetes' section of this documentation.
 
@@ -270,6 +270,11 @@ Terraform creates the following outputs:
 They are printed at the end of executing 'terraform apply' and they can be accessed by running the command:
 >terraform output
 
+### SSH key generation
+We are using the modules/ssh module which generates SSH keys as strings which are saved on our local computer and created VMs. They will be used for connecting to the created VMs.
+
+The ssh_path Terraform variable specifies where on our local computer the private key will be saved. The recommended one for Windows is C:\\Users\\username\\.ssh\\id_rsa (if we save the private key here then we don't need to provide a path to that key when running the 'ssh' command).
+
 ### ACR setup
 ACR is created using the terraform_linux_vm > modules > acr module. We are also creating a Service Principal which will be used for authentication to it using the service_principal module.
 
@@ -282,6 +287,8 @@ We are creating VMs of specified size (Standard_B2ms by default) and we create o
 We are creating networks (Vnets) for our VMs. They will get assigned public IP addresses and we can define for them security rules.
 
 In the terraform_linux_vm > modules > networks > main.tf we are defining security rules for our VMs network. We open there specific ports required to run Kubernetes, to be able to connect through SSH and to access a Jupyter Notebook from a browser on our local computer.
+
+This networking setup is crucial to make sure that Kubernetes cluster works properly. When creating those networking rules, we need to take into account among the others what CNI we are using in our Kubernetes cluster (Calico in this case).
 
 ### Bash scripts for configuring VMs
 After creating VMs using Terraform we are executing on them bash scripts using the azurerm_virtual_machine_extension Terraform resource which uses Azure VM Extension.
@@ -316,6 +323,17 @@ We are inserting into those scripts variables specified in the templatefile func
 
 
 # Problems and ideas for improvements
+## Kubernetes resources deployment
+It might be a good idea to change the bash script for configuring VM1, vm1_configure.tftpl, such that it only configures Kubernetes but doesn't deploy any resources.
+
+That script can create another bash script and save it on the VM1, which will contain code for deploying all the Kubernetes resources. It can be executed manually after creating VMs and configuring Kubernetes cluster.
+
+Maybe creating resources too early causes some problems.
+
+Although if we do this, then Spark Operator pods (controller and webhook) will be deployed on the worker node and then deploying SparkApplication CR doesn't work (it is described in more detail in the 'Spark Operator Webhook' section below).
+
+Deploying Kubernetes resources manually after Kubernetes cluster is set up might be good idea but first we would need to solve the problem from the 'Spark Operator Webhook' section.
+
 ## Volume with Spark scripts
 Because volume with Spark scripts used by Spark Driver and Executors' Pods' is linked into the node which is running those Pods, that means that we need to have that script on all the cluster nodes (because Pods can be deployed on any node).
 
@@ -326,18 +344,25 @@ There are two options for improving it:
 - Save Spark scripts in shared storage - For example in the MinIO running on the same Kubernetes cluster or in cloud object storage.
 
 ## Spark Operator Webhook
-It looks like when we install Spark Operator and we have available a worker node, then spark operator pods (controller and webhook) are created on that worker node.
+We have the following problems:
+- When spark operator pods (controller and webhook) are created on the worker node, then:
+    - When we try to deploy the SparkApplication in the default namespace, then we get an error about the webhook: 'failed to call webhook ... context deadline exceeded'.
+    - When we try to deploy the SparkApplication in the spark-operator namespace (the same as spark operator pods), then it gets deployed but nothing happens (it doesn't change status, there are no logs, Spark Driver Pod doesn't get created)
+- When spark operator pods are created on the master node, then we can deploy the SparkApplication resource and it gets completed.
+    - In order to be able to deploy spark operator pods on the mater node, we need to patch their deployments and add tolerations (it is done in the bash script vm1_configure.tftpl)
 
-When spark operator pods runs on the worker node, then we are not able to deploy a SparkApplication resource. We get error about webhook timeout.
-
-But when we have spark operator pods created on the master node, then deploying SparkApplication resource works fine.
-
-It looks like this is an issue with CoreDNS. Kubernetes APi server is not able to communicate with the webhook through its service. When I try to resolve that webhook's service DNS name (<webhook-service-name>.<namespace>.svc) from inside of a testing Pod, I can't do this.
-
-Some of the solutions I tried (it might be worth to try them again in a different way):
-- Lower ndots in dnsConfig (that is in the /etc/resolv.conf file in a Pod)
-- Changing values next to the ‘forward’ parameter in the CoreDNS configMap
+The issue from the next section 'DNS resolution' is related to this.
 
 Forums about similar issues:
 - https://stackoverflow.com/questions/72059332/how-can-i-fix-failed-calling-webhook-webhook-cert-manager-io
 - https://stackoverflow.com/questions/74783557/metallb-kubernetes-installation-failed-calling-webhook-ipaddresspoolvalidation
+
+## DNS resolution
+There is a problem with resolution of public and Services DNS names from inside of a Pod. This is related to the issue from the previous section 'Spark Operator Webhook'.
+
+Symptoms:
+- At the beginning, after cluster setup, we can't resolve public and Services DNS names from inside of a Pod. When we restart the coreDNS deployment `kubectl -n kube-system rollout restart deployment coredns`, it starts working, but deploying SparkApplication still gives the same error about the webhook.
+- 
+
+## Terraform code sometimes doesn't work
+Sometimes not entire bash script is executed successfully on one of the VMs and we need to run the entire Terraform code again (I don't know why).
